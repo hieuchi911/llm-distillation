@@ -7,3 +7,5 @@ datasets/generated
 train/*
 datasets/hf/*
 jobs/*
+
+.vscode/

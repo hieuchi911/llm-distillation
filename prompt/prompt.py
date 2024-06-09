@@ -17,9 +17,9 @@ def __load_module_from_py_file(py_file: str) -> object:
 def create_prompt(task: str, few_shot: int, **args):
     prompt = ""
     if args.get('sys_user', False):
-        prompt += json.load(open(f"{os.getenv('HOME')}/llm-distillation/prompt/context.json"))[task] + "\n\n"
+        prompt += json.load(open(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation/prompt/context.json"))[task] + "\n\n"
 
-    module = __load_module_from_py_file(f"{os.getenv('HOME')}/llm-distillation/prompt/few_shot/{task}.py")
+    module = __load_module_from_py_file(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation/prompt/few_shot/{task}.py")
     request = '\n'.join(getattr(module, "create_request")(**args))
 
     if few_shot:
@@ -31,8 +31,8 @@ def create_prompt(task: str, few_shot: int, **args):
 
 
 def create_chat_prompt(task: str, few_shot: int, **args):
-    chat, sys_prompt = [], json.load(open(f"{os.getenv('HOME')}/llm-distillation/prompt/context.json"))[task]
-    module = __load_module_from_py_file(f"{os.getenv('HOME')}/llm-distillation/prompt/few_shot/{task}.py")
+    chat, sys_prompt = [], json.load(open(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation/prompt/context.json"))[task]
+    module = __load_module_from_py_file(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation/prompt/few_shot/{task}.py")
     request = getattr(module, "create_request")(**args)
 
     if not args.get('sys_user', False): chat.append({"role": "system", "content": sys_prompt})

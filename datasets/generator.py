@@ -9,8 +9,10 @@ from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset, load_from_disk
 from itertools import chain
 from tqdm import tqdm
+import debugpy
+import functools
 
-sys.path.append(f"{os.getenv('HOME')}/llm-distillation")
+sys.path.append(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation")
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 def get_device():
@@ -24,19 +26,25 @@ def get_device():
 def tokenization(items, tokenizer):
     return tokenizer(items["prompt"], padding='longest')
 
+def collate_fn(items, tokenizer, model_len=None):
+    return tokenizer([i["prompt"] for i in items], padding="longest", return_tensors='pt')
+
 def mapping(path, ds):
     with open(path, 'r') as f: mapping = json.load(f)
     for key, value in mapping.items():
         ds = ds.rename_column(key, value)
     return ds
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Script to benchmark a model on a dataset.")
     parser.add_argument("--model_id", type=str, default="meta-llama/Llama-2-7b-hf", help="Model ID")
     parser.add_argument("--model_tokenizer", type=str, help="Model tokenizer (default: model_id)")
     parser.add_argument("--dataset_id", type=str, help="Dataset hugging face ID")
+    parser.add_argument("--subset", type=str, help="Dataset subset name")
     parser.add_argument("--split_name", type=str, default="test", help="Dataset split name")
     parser.add_argument("--context", action="store_true", help="To pre prompt an explanation of the task")
+    parser.add_argument("--debug", action="store_true", help="To debug")
     parser.add_argument("--title", action="store_true", help="To keep title in the prompt")
     parser.add_argument("--number_few_shot", type=int, default=0, help="Number of few-shot examples")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
@@ -73,7 +81,7 @@ if __name__ == "__main__":
                 sys_user = True if "mistralai" in args.model_id or args.context else False,
                 chat_template = tokenizer.apply_chat_template if is_chat else None
             )
-        elif task == "summary_dialogue":
+        elif task == "summary_dialogue" or task == "summary_news":
             item['prompt'] = create_prompt(
                 task, few_shot,
                 context = item['context'],
@@ -94,7 +102,7 @@ if __name__ == "__main__":
     logging.info(f'Tokenizer loaded.')
 
     logging.info('Loading model...')
-    if args.bfloat and device != "cpu": model = AutoModelForCausalLM.from_pretrained(args.model_id, torch_dtype=torch.bfloat16).to(device)
+    if args.bfloat and device != "cpu": model = AutoModelForCausalLM.from_pretrained(args.model_id, torch_dtype=torch.bfloat16, device_map="auto")
     else: model = AutoModelForCausalLM.from_pretrained(args.model_id).to(device)
     model.resize_token_embeddings(len(tokenizer))
     model.config.pad_token_id = tokenizer.pad_token_id
@@ -105,21 +113,30 @@ if __name__ == "__main__":
     if args.from_disk:
         dataset = load_from_disk(args.dataset_id)
         if args.split_name: dataset = dataset[args.split_name]
-    else: dataset = load_dataset(args.dataset_id, split=args.split_name)
+    else: dataset = load_dataset(args.dataset_id, args.subset, split=args.split_name)
+    # select 50000 samples randomly from the dataset
+    dataset = dataset.shuffle(seed=42)
+    dataset = dataset.select(range(50000))
+
+    # debug on 100 samples
+    if args.debug: dataset = dataset.select(range(100))
     if args.mapping: dataset = mapping(args.mapping, dataset)
     has_title = True if 'title' in dataset.column_names and args.title else False
-    dataset = dataset.map(lambda item: create_prompt_column(args.task, args.number_few_shot, item, has_title))
-    dataset = dataset.map(lambda items: tokenization(items, tokenizer=tokenizer), batched=True, batch_size=args.batch_size)
+    dataset = dataset.map(lambda item: create_prompt_column(args.task, args.number_few_shot, item, has_title), num_proc=int(0.5 * os.cpu_count()))
     print(args.model_id)
     print(dataset['prompt'][0])
-    dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers)
+    collate = functools.partial(collate_fn, tokenizer=tokenizer)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate)
     logging.info('Dataset processed...')
 
     logging.info('Starting predictions...')
     predictions = []
+    count = 0
     with torch.no_grad():
         for batch in tqdm(dataloader):
+            if batch['input_ids'].shape[1] > 4500:
+                count += 1
+                continue
             output = model.generate(
                 batch['input_ids'].to(device),
                 attention_mask=batch['attention_mask'].to(device),
@@ -135,6 +152,7 @@ if __name__ == "__main__":
                     sentences[i] = sentences[i][:-10]
             predictions.append(sentences)
     logging.info('Predictions finished')
+    print(f"\n\nThere are {count} batches excluded\n\n")
 
     logging.info('Saving dataset...')
     if isinstance(dataset['answers'][0], dict): answers = [item[args.mapping_dict] for item in dataset['answers']]
@@ -164,5 +182,5 @@ if __name__ == "__main__":
             'summary_generated': list(chain(*predictions))
         })
 
-    dataset_generated.save_to_disk(f"{os.getenv('HOME')}/llm-distillation/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}")
+    dataset_generated.save_to_disk(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}")
     logging.info('Dataset saved')
