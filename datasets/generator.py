@@ -12,7 +12,7 @@ from tqdm import tqdm
 import debugpy
 import functools
 
-sys.path.append(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation")
+sys.path.append(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation-test")
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 def get_device():
@@ -153,7 +153,8 @@ if __name__ == "__main__":
                     if "falcon" in args.model_id and sentences[i].endswith("<|im_end|>"):
                         sentences[i] = sentences[i][:-10]
             predictions.append(sentences)
-            with open(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}/{args.temp_name}.txt", "a") as f:
+            os.makedirs(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation-test/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}", exist_ok=True)
+            with open(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation-test/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}/{args.temp_name}.txt", "a") as f:
                 for s in sentences: f.write(s + "\n")
     logging.info('Predictions finished')
     print(f"\n\nThere are {count} batches excluded\n\n")
@@ -186,5 +187,5 @@ if __name__ == "__main__":
             'summary_generated': list(chain(*predictions))
         })
 
-    dataset_generated.save_to_disk(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}")
+    dataset_generated.save_to_disk(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation-test/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}")
     logging.info('Dataset saved')
