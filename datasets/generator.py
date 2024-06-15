@@ -43,6 +43,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_id", type=str, help="Dataset hugging face ID")
     parser.add_argument("--subset", type=str, help="Dataset subset name")
     parser.add_argument("--split_name", type=str, default="test", help="Dataset split name")
+    parser.add_argument("--temp_name", type=str, default="temp", help="Temp file that stores prediction text as they are generated")
     parser.add_argument("--context", action="store_true", help="To pre prompt an explanation of the task")
     parser.add_argument("--debug", action="store_true", help="To debug")
     parser.add_argument("--title", action="store_true", help="To keep title in the prompt")
@@ -136,21 +137,24 @@ if __name__ == "__main__":
         for batch in tqdm(dataloader):
             if batch['input_ids'].shape[1] > 4500:
                 count += 1
-                continue
-            output = model.generate(
-                batch['input_ids'].to(device),
-                attention_mask=batch['attention_mask'].to(device),
-                max_new_tokens=150,
-                do_sample=False,
-                eos_token_id= [193, tokenizer.eos_token_id] if "falcon" in args.model_id else tokenizer.eos_token_id
-            )
-            output = output[:, len(batch['input_ids'][0]):]
-            sentences = tokenizer.batch_decode(output, skip_special_tokens=True)
-            for i in range(len(sentences)):
-                sentences[i] = sentences[i].split('\n')[0].strip()
-                if "falcon" in args.model_id and sentences[i].endswith("<|im_end|>"):
-                    sentences[i] = sentences[i][:-10]
+                sentences = ["" for _ in range(batch['input_ids'].shape[0])]
+            else:
+                output = model.generate(
+                    batch['input_ids'].to(device),
+                    attention_mask=batch['attention_mask'].to(device),
+                    max_new_tokens=150,
+                    do_sample=False,
+                    eos_token_id= [193, tokenizer.eos_token_id] if "falcon" in args.model_id else tokenizer.eos_token_id
+                )
+                output = output[:, len(batch['input_ids'][0]):]
+                sentences = tokenizer.batch_decode(output, skip_special_tokens=True)
+                for i in range(len(sentences)):
+                    sentences[i] = sentences[i].split('\n')[0].strip()
+                    if "falcon" in args.model_id and sentences[i].endswith("<|im_end|>"):
+                        sentences[i] = sentences[i][:-10]
             predictions.append(sentences)
+            with open(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}/{args.temp_name}.txt", "a") as f:
+                for s in sentences: f.write(s + "\n")
     logging.info('Predictions finished')
     print(f"\n\nThere are {count} batches excluded\n\n")
 
