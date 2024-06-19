@@ -23,9 +23,10 @@ python datasets/generator.py \
 --number_few_shot 2 \
 --bfloat \
 --mapping benchmark/mapping/CnndmSum.json \
---batch_size 8 \
+--batch_size 16 \
 --task summary_news \
---split_name train 
+--split_name train \
+--gpus 2
 ```
 , this will create a new dataset at `datasets/generated/Llama-2-7b-chat-hf/cnn_dailymail/train`, which contains the summarization created by `LLaMA-2-7B` on **50k** news articles form CNN DailyMail dataset (on the `train` set):
 ```

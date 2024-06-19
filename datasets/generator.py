@@ -4,36 +4,29 @@ import json
 import torch
 import logging
 import argparse
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset, load_from_disk
 from itertools import chain
 from tqdm import tqdm
-import debugpy
-import functools
+from vllm import LLM, SamplingParams
 
-sys.path.append(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation-test")
-os.environ["TOKENIZERS_PARALLELISM"] = "true"
-
-def get_device():
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        device = torch.device("mps")
-    return device
+PROJ_PATH = f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation"
+sys.path.append(PROJ_PATH)
 
 def tokenization(items, tokenizer):
     return tokenizer(items["prompt"], padding='longest')
-
-def collate_fn(items, tokenizer, model_len=None):
-    return tokenizer([i["prompt"] for i in items], padding="longest", return_tensors='pt')
 
 def mapping(path, ds):
     with open(path, 'r') as f: mapping = json.load(f)
     for key, value in mapping.items():
         ds = ds.rename_column(key, value)
     return ds
+
+def text_checkpoint(output, args, file_path):
+    if not os.path.exists(file_path): os.makedirs(file_path)
+    with open(file_path + f"/{args.temp_name}.txt", "a", encoding='utf-8') as f:
+        for s in output: f.write(s.replace("\n", " ") + "\n")
 
 
 if __name__ == "__main__":
@@ -50,12 +43,15 @@ if __name__ == "__main__":
     parser.add_argument("--number_few_shot", type=int, default=0, help="Number of few-shot examples")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument("--num_workers", type=int, default=2, help="Number of data loader workers")
+    parser.add_argument("--gpus", type=int, default=2, help="Number of GPUs to use for distributed execution with tensor parallelism")
     parser.add_argument("--bfloat", action="store_true", help="Load model in bf16")
     parser.add_argument("--from_disk", action="store_true", help="Load dataset from disk")
     parser.add_argument("--task", type=str, default="qa", help="Benchmark type (qa, qa_generative, summarization)")
     parser.add_argument("--mapping", type=str, default="", help="JSON file to map dataset column name")
     parser.add_argument("--mapping_dict", type=str, default="text", help="Field name in the answer dictionary.")
     args = parser.parse_args()
+
+    file_path = f"{PROJ_PATH}/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}"
 
     if 'chat' in args.model_id or "instruct" in args.model_id.lower():
         from prompt.prompt import create_chat_prompt as create_prompt
@@ -93,22 +89,12 @@ if __name__ == "__main__":
     
     logging.basicConfig(level=logging.INFO)
     logging.info('Start')
-    device = get_device()
-    logging.info(f'Device: {device}')
 
     logging.info(f'Loading tokenizer...')
     tokenizer = AutoTokenizer.from_pretrained(args.model_tokenizer if args.model_tokenizer else args.model_id)
     tokenizer.add_special_tokens({"pad_token":tokenizer.eos_token})
     tokenizer.padding_side = 'left'
     logging.info(f'Tokenizer loaded.')
-
-    logging.info('Loading model...')
-    if args.bfloat and device != "cpu": model = AutoModelForCausalLM.from_pretrained(args.model_id, torch_dtype=torch.bfloat16, device_map="auto")
-    else: model = AutoModelForCausalLM.from_pretrained(args.model_id).to(device)
-    model.resize_token_embeddings(len(tokenizer))
-    model.config.pad_token_id = tokenizer.pad_token_id
-    model.eval()
-    logging.info('Model loaded.')
 
     logging.info('Processing dataset...')
     if args.from_disk:
@@ -120,44 +106,33 @@ if __name__ == "__main__":
     dataset = dataset.select(range(50000))
 
     # debug on 100 samples
-    if args.debug: dataset = dataset.select(range(100))
+    if args.debug: dataset = dataset.select(range(500))
     if args.mapping: dataset = mapping(args.mapping, dataset)
     has_title = True if 'title' in dataset.column_names and args.title else False
     dataset = dataset.map(lambda item: create_prompt_column(args.task, args.number_few_shot, item, has_title), num_proc=int(0.5 * os.cpu_count()))
+    
     print(args.model_id)
     print(dataset['prompt'][0])
-    collate = functools.partial(collate_fn, tokenizer=tokenizer)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers)
     logging.info('Dataset processed...')
+
+    logging.info('Loading model...')
+    model = LLM(model=args.model_id, tensor_parallel_size=args.gpus, dtype=torch.bfloat16) # `gpu_memory_utilization=0.9` by default, reduce this to avoid OOM
+    sampling_params = SamplingParams(temperature=0, max_tokens=150) # `temperature=0` for greedy decoding
+
+    logging.info('Model loaded.')
 
     logging.info('Starting predictions...')
     predictions = []
-    count = 0
     with torch.no_grad():
-        for batch in tqdm(dataloader):
-            if batch['input_ids'].shape[1] > 4500:
-                count += 1
-                sentences = ["" for _ in range(batch['input_ids'].shape[0])]
-            else:
-                output = model.generate(
-                    batch['input_ids'].to(device),
-                    attention_mask=batch['attention_mask'].to(device),
-                    max_new_tokens=150,
-                    do_sample=False,
-                    eos_token_id= [193, tokenizer.eos_token_id] if "falcon" in args.model_id else tokenizer.eos_token_id
-                )
-                output = output[:, len(batch['input_ids'][0]):]
-                sentences = tokenizer.batch_decode(output, skip_special_tokens=True)
-                for i in range(len(sentences)):
-                    sentences[i] = sentences[i].split('\n')[0].strip()
-                    if "falcon" in args.model_id and sentences[i].endswith("<|im_end|>"):
-                        sentences[i] = sentences[i][:-10]
-            predictions.append(sentences)
-            os.makedirs(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation-test/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}", exist_ok=True)
-            with open(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation-test/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}/{args.temp_name}.txt", "a") as f:
-                for s in sentences: f.write(s + "\n")
+        for i, batch in enumerate(tqdm(dataloader)):
+            outputs = model.generate(batch["prompt"], sampling_params, use_tqdm=False)
+            output = [preds.outputs[0].text for preds in outputs]
+            predictions.append(output)
+
+            text_checkpoint(output, args, file_path)
+
     logging.info('Predictions finished')
-    print(f"\n\nThere are {count} batches excluded\n\n")
 
     logging.info('Saving dataset...')
     if isinstance(dataset['answers'][0], dict): answers = [item[args.mapping_dict] for item in dataset['answers']]
@@ -187,5 +162,5 @@ if __name__ == "__main__":
             'summary_generated': list(chain(*predictions))
         })
 
-    dataset_generated.save_to_disk(f"{os.getenv('HOME')}/{os.getenv('PROJECT_DIR')}/llm-distillation-test/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}")
+    dataset_generated.save_to_disk(file_path)
     logging.info('Dataset saved')
