@@ -17,16 +17,16 @@ This is a fork from [llm-distillation](https://github.com/Nicolas-BZRD/llm-disti
 Run the following command to generate summarization text with **LLaMA-2-7B** teacher model on the CNN DailyMail dataset:
 ```
 python datasets/generator.py \
---model_id meta-llama/Llama-2-7b-chat-hf \
---dataset_id abisee/cnn_dailymail \
---subset 1.0.0 \
+--model_id meta-llama/Meta-Llama-3-8B-Instruct \
+--dataset_id /home1/hieutn/cs566/i-am-sober/processed_data/cnn_dailymail/full-1024-512/llama/valid.json \
+--save_path /home1/hieutn/cs566/i-am-sober/processed_data/cnn_dailymail/full-1024-512/llama/valid-seqkd.json \
 --number_few_shot 2 \
 --bfloat \
---mapping benchmark/mapping/CnndmSum.json \
+--mapping benchmark/mapping/CnndmSum-llamafactory.json \
 --batch_size 16 \
 --task summary_news \
---split_name train \
---gpus 2
+--gpus 2 \
+--from_disk
 ```
 , this will create a new dataset at `datasets/generated/Llama-2-7b-chat-hf/cnn_dailymail/train`, which contains the summarization created by `LLaMA-2-7B` on **50k** news articles form CNN DailyMail dataset (on the `train` set):
 ```

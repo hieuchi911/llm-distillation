@@ -34,9 +34,11 @@ if __name__ == "__main__":
     parser.add_argument("--model_id", type=str, default="meta-llama/Llama-2-7b-hf", help="Model ID")
     parser.add_argument("--model_tokenizer", type=str, help="Model tokenizer (default: model_id)")
     parser.add_argument("--dataset_id", type=str, help="Dataset hugging face ID")
+    parser.add_argument("--save_path", type=str, help="Where to store the result data")
     parser.add_argument("--subset", type=str, help="Dataset subset name")
-    parser.add_argument("--split_name", type=str, default="test", help="Dataset split name")
+    parser.add_argument("--split_name", type=str, help="Dataset split name")
     parser.add_argument("--temp_name", type=str, default="temp", help="Temp file that stores prediction text as they are generated")
+    parser.add_argument("--save_text", action="store_true", help="Whether to store prediction text as they are generated")
     parser.add_argument("--context", action="store_true", help="To pre prompt an explanation of the task")
     parser.add_argument("--debug", action="store_true", help="To debug")
     parser.add_argument("--title", action="store_true", help="To keep title in the prompt")
@@ -51,7 +53,8 @@ if __name__ == "__main__":
     parser.add_argument("--mapping_dict", type=str, default="text", help="Field name in the answer dictionary.")
     args = parser.parse_args()
 
-    file_path = f"{PROJ_PATH}/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}"
+    if not args.save_path: file_path = f"{PROJ_PATH}/datasets/generated/{args.model_id.split('/')[-1]}/{args.dataset_id.split('/')[-1]}/{args.split_name}"
+    else: file_path = args.save_path
 
     if 'chat' in args.model_id or "instruct" in args.model_id.lower():
         from prompt.prompt import create_chat_prompt as create_prompt
@@ -98,12 +101,16 @@ if __name__ == "__main__":
 
     logging.info('Processing dataset...')
     if args.from_disk:
-        dataset = load_from_disk(args.dataset_id)
+        if ".json" in args.dataset_id:
+            dataset = Dataset.from_json(args.dataset_id)
+            dataset = dataset.rename_column("prompt", "llama_factory_prompt")
+        else: dataset = load_from_disk(args.dataset_id)
         if args.split_name: dataset = dataset[args.split_name]
-    else: dataset = load_dataset(args.dataset_id, args.subset, split=args.split_name)
-    # select 50000 samples randomly from the dataset
-    dataset = dataset.shuffle(seed=42)
-    dataset = dataset.select(range(50000))
+    else:
+        dataset = load_dataset(args.dataset_id, args.subset, split=args.split_name)
+        # select 50000 samples randomly from the dataset
+        dataset = dataset.shuffle(seed=42)
+        dataset = dataset.select(range(50000))
 
     # debug on 100 samples
     if args.debug: dataset = dataset.select(range(500))
@@ -117,7 +124,7 @@ if __name__ == "__main__":
     logging.info('Dataset processed...')
 
     logging.info('Loading model...')
-    model = LLM(model=args.model_id, tensor_parallel_size=args.gpus, dtype=torch.bfloat16) # `gpu_memory_utilization=0.9` by default, reduce this to avoid OOM
+    model = LLM(model=args.model_id, tensor_parallel_size=args.gpus, dtype=torch.float16) # `gpu_memory_utilization=0.9` by default, reduce this to avoid OOM
     sampling_params = SamplingParams(temperature=0, max_tokens=150) # `temperature=0` for greedy decoding
 
     logging.info('Model loaded.')
@@ -130,7 +137,7 @@ if __name__ == "__main__":
             output = [preds.outputs[0].text for preds in outputs]
             predictions.append(output)
 
-            text_checkpoint(output, args, file_path)
+            if args.save_text: text_checkpoint(output, args, file_path)
 
     logging.info('Predictions finished')
 
@@ -138,29 +145,43 @@ if __name__ == "__main__":
     if isinstance(dataset['answers'][0], dict): answers = [item[args.mapping_dict] for item in dataset['answers']]
     elif isinstance(dataset['answers'][0][0], dict): answers = [item[0][args.mapping_dict] for item in dataset['answers']]
     else: answers = dataset['answers']
-
-    if args.task.startswith("qa"):
-        if has_title:
-            dataset_generated = Dataset.from_dict({
-                'title': dataset['title'],
-                'context': dataset['context'],
-                'question': dataset['question'],
-                'answers': dataset['answers'],
-                'answers_generated': list(chain(*predictions))
-            })
-        else:
-            dataset_generated = Dataset.from_dict({
-                'context': dataset['context'],
-                'question': dataset['question'],
-                'answers': dataset['answers'],
-                'answers_generated': list(chain(*predictions))
-            })
-    if args.task.startswith("summary"):
+    
+    if ".json" in args.dataset_id:
+        # save dataset_generated as json file of a list of dictionaries, each dictionary contains the context, question, answers, and answers_generated
         dataset_generated = Dataset.from_dict({
-            'context': dataset['context'],
-            'summary': dataset['answers'],
-            'summary_generated': list(chain(*predictions))
+            'input': dataset['context'],
+            'output': list(chain(*predictions)),
+            'instruction': dataset['instruction'],
+            'prompt': dataset['llama_factory_prompt']
         })
+        dataset_generated = dataset_generated.to_dict()
+        all_data = [{key: value[i] for key, value in dataset_generated.items()} for i in range(len(dataset))]
+        with open(f"{args.save_path}", "w") as f:
+            json.dump(all_data, f)
+    else:
+        if args.task.startswith("qa"):
+            if has_title:
+                dataset_generated = Dataset.from_dict({
+                    'title': dataset['title'],
+                    'context': dataset['context'],
+                    'question': dataset['question'],
+                    'answers': dataset['answers'],
+                    'answers_generated': list(chain(*predictions))
+                })
+            else:
+                dataset_generated = Dataset.from_dict({
+                    'context': dataset['context'],
+                    'question': dataset['question'],
+                    'answers': dataset['answers'],
+                    'answers_generated': list(chain(*predictions))
+                })
+        if args.task.startswith("summary"):
+            dataset_generated = Dataset.from_dict({
+                'context': dataset['context'],
+                'summary': dataset['answers'],
+                'summary_generated': list(chain(*predictions))
+            })
 
-    dataset_generated.save_to_disk(file_path)
+        dataset_generated.save_to_disk(file_path)
+
     logging.info('Dataset saved')
